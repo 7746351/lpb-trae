@@ -1,0 +1,81 @@
+#ifndef SNOW_SHOT_PRESENTATION_SCREENSHOTCAPTUREWORKFLOWPORTS_H
+#define SNOW_SHOT_PRESENTATION_SCREENSHOTCAPTUREWORKFLOWPORTS_H
+
+#include "snow_shot/presentation/screenshottypes.h"
+
+#include <QPoint>
+
+#include <cstdint>
+
+class ScreenshotDisplaySession;
+
+class ScreenshotCaptureWorkerEventSink {
+  public:
+    virtual ~ScreenshotCaptureWorkerEventSink() = default;
+
+    // Delivered on the GUI thread. IDs fence publication, independently of native cancellation.
+    virtual void handleLayoutReady(const ScreenshotCaptureLayout& layout) = 0;
+    virtual void handleCapturePrepared(quint64 requestId, bool ok) = 0;
+    virtual void handleCaptureFinished(const ScreenshotCaptureResult& result) = 0;
+    virtual void handleLayoutRefreshed(quint64 requestId, bool ok) = 0;
+};
+
+class ScreenshotCaptureRuntimePort {
+  public:
+    virtual ~ScreenshotCaptureRuntimePort() = default;
+
+    // All port calls and sink delivery have GUI affinity. The controller owns this runtime
+    // and its workflow; callbacks may synchronously cancel or replace the capture session.
+    // Neither object may be destroyed until an active port/callback invocation returns.
+    // The sink is borrowed: clear it before workflow destruction, and retire queued delivery
+    // through its QObject context before destroying the runtime.
+    virtual void setEventSink(ScreenshotCaptureWorkerEventSink* sink) = 0;
+    [[nodiscard]] virtual bool captureWorkerCreated() const = 0;
+    virtual void ensureCaptureWorker() = 0;
+    virtual void prepareAsync(quint64 requestId) = 0;
+    virtual void refreshLayoutAsync(quint64 requestId) = 0;
+    virtual void captureAsync(const ScreenshotCaptureRequest& request) = 0;
+    // Requests cancellation; does not acknowledge native completion or release worker occupancy.
+    virtual void cancelActiveCapture() = 0;
+    // Cancels and joins the capture worker. Unlike selector callback quiescence, this waits
+    // for provider work to finish; no bounded shutdown deadline is promised.
+    virtual void shutdownCaptureWorker() = 0;
+
+    [[nodiscard]] virtual bool selectorReady() const = 0;
+    [[nodiscard]] virtual bool selectorRefreshInFlight() const = 0;
+    [[nodiscard]] virtual bool selectorHitTestInFlight() const = 0;
+    virtual void releaseSelectorCache() = 0;
+    virtual void resetHitTestState() = 0;
+    virtual void destroySelectorService() = 0;
+    virtual void startWorkflowRefresh() = 0;
+    virtual void clearSelectorSelection() = 0;
+    [[nodiscard]] virtual bool updateSelectorSelectionAt(const QPoint& physicalPoint) = 0;
+
+    virtual void prewarmDisplayPool(ScreenshotDisplaySession& displaySession, int displayCount) = 0;
+    virtual void clearOverlayCanvases(const ScreenshotDisplaySession& displaySession) const = 0;
+    virtual void clearDisplays(ScreenshotDisplaySession& displaySession) = 0;
+    virtual void destroyDisplayPool(ScreenshotDisplaySession& displaySession) = 0;
+    virtual void resetForNewCapture(ScreenshotDisplaySession& displaySession) = 0;
+    virtual void prepareDisplayModels(ScreenshotDisplaySession& displaySession) = 0;
+    virtual void prepareOverlayBackingStores(const ScreenshotDisplaySession& displaySession) = 0;
+    virtual void applyDisplayModels(ScreenshotDisplaySession& displaySession) = 0;
+    [[nodiscard]] virtual bool
+    preparePreCaptureOverlayWindows(ScreenshotDisplaySession& displaySession) = 0;
+    virtual void showOverlayWindows(const ScreenshotDisplaySession& displaySession,
+                                    ScreenshotOverlayShowMode mode) = 0;
+    // Retirement invalidates queued reveal/activation before hiding. Native storage release
+    // and immutable export-source lifetime are separate from visible presentation retirement.
+    virtual void hideOverlayWindowsImmediately(const ScreenshotDisplaySession& displaySession) = 0;
+    virtual void hideOverlayWindows(const ScreenshotDisplaySession& displaySession) = 0;
+    virtual void releaseSelectionPreviewCache() = 0;
+    virtual void prewarmToolbarSurface(const ScreenshotDisplaySession& displaySession) = 0;
+
+    [[nodiscard]] virtual bool clearDocumentPreservingViewports() = 0;
+    [[nodiscard]] virtual bool resetCanvasRuntime() = 0;
+    virtual void createColorPicker(const QPoint& initialCursorGlobalPosition) = 0;
+    virtual void prepareColorPickerSurface(const ScreenshotDisplaySession& displaySession) = 0;
+    virtual void releaseColorPicker() = 0;
+    virtual void resetColorPicker() = 0;
+};
+
+#endif // SNOW_SHOT_PRESENTATION_SCREENSHOTCAPTUREWORKFLOWPORTS_H

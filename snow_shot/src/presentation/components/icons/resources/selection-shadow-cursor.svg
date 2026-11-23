@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="32"
+     height="32"
+     viewBox="0 0 32 32"
+     fill="none">
+  <title>Shadow width cursor</title>
+  <defs>
+    <filter id="soft-black-edge"
+            x="-50%"
+            y="-50%"
+            width="200%"
+            height="200%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="0.32" result="blur"/>
+      <feOffset in="blur" dx="-1.5" dy="1.5" result="offset-blur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.68" result="shadow-color"/>
+      <feComposite in="shadow-color" in2="offset-blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="soft-black-edge-light"
+            x="-50%"
+            y="-50%"
+            width="200%"
+            height="200%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="0.12" result="blur"/>
+      <feOffset in="blur" dx="-1.5" dy="1.5" result="offset-blur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.40" result="shadow-color"/>
+      <feComposite in="shadow-color" in2="offset-blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g filter="url(#soft-black-edge)">
+    <path d="M 3 10 L 9 5 V 8 H 19 V 5 L 25 10 L 19 15 V 12 H 9 V 15 Z"
+          fill="#000000"
+          stroke="#FFFFFF"
+          stroke-width="1.8"
+          stroke-linejoin="round"/>
+  </g>
+
+  <g transform="translate(0.5 0.5) scale(0.66)">
+    <g filter="url(#soft-black-edge-light)"
+       stroke="#FFFFFF"
+       stroke-width="2.484375">
+      <rect x="31" y="31" width="12" height="12" rx="2.2" fill="#555555"/>
+      <rect x="26.5" y="26.5" width="12" height="12" rx="2.2" fill="#000000"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,142 @@
+#include "snow_shot/presentation/directcaptureworkflow.h"
+#include "snow_shot/platform/screenshotwindownames.h"
+
+#include <QCoreApplication>
+#include <QPointer>
+#include <QTimer>
+
+#include <utility>
+
+namespace snow_shot::presentation {
+namespace {
+QString queueError() {
+    return QCoreApplication::translate("DirectCaptureController",
+                                       "The capture operation could not be queued");
+}
+} // namespace
+
+void DirectCaptureRequest::snapshotWindowNames(const QString& directory,
+                                               const QPointF& monitorCursor) {
+    exportContext = {};
+    const auto fields = storage::screenshotWindowNameFields(directory, filenameFormat);
+    if (!fields.any())
+        return;
+    if (target == DirectCaptureTarget::FocusedWindow && window != 0)
+        exportContext = platform::screenshotWindowNamesForWindow(window, fields);
+    else if (target == DirectCaptureTarget::CurrentMonitor && !monitorName.isEmpty())
+        exportContext = platform::screenshotWindowNamesAtPoint(monitorCursor, {}, fields);
+}
+
+DirectCaptureWorkflow::DirectCaptureWorkflow(DirectCapturePorts ports, QObject* parent)
+    : QObject(parent), m_ports(std::move(ports)) {}
+
+void DirectCaptureWorkflow::enqueue(DirectCaptureRequest request) {
+    if (m_phase == Phase::Stopped)
+        return;
+    m_queue.push_back(std::move(request));
+    const QPointer<DirectCaptureWorkflow> self(this);
+    if (m_queue.back().shutterSoundNotification && m_ports.captureRequested)
+        m_ports.captureRequested();
+    if (self && self->m_phase == Phase::Idle)
+        self->startNext();
+}
+
+qsizetype DirectCaptureWorkflow::pendingCount() const {
+    return static_cast<qsizetype>(m_queue.size());
+}
+
+void DirectCaptureWorkflow::shutdown() {
+    ++m_generation;
+    m_phase = Phase::Stopped;
+    m_queue.clear();
+    m_frame = {};
+}
+
+void DirectCaptureWorkflow::report(const QString& error, bool warning) {
+    if (!error.isEmpty() && m_ports.report)
+        m_ports.report(error, warning);
+}
+
+void DirectCaptureWorkflow::startNext() {
+    if (m_phase != Phase::Idle || m_queue.empty())
+        return;
+    m_phase = Phase::Acquiring;
+    const quint64 generation = ++m_generation;
+    const QPointer<DirectCaptureWorkflow> self(this);
+    auto complete = [self, generation](DirectCaptureFrame frame) {
+        if (!self || self->m_generation != generation || self->m_phase != Phase::Acquiring)
+            return;
+        if (!frame.isValid()) {
+            self->report(frame.error.isEmpty()
+                             ? QCoreApplication::translate("DirectCaptureController",
+                                                           "The capture returned an invalid image")
+                             : frame.error);
+            if (self)
+                self->finish();
+            return;
+        }
+        self->m_frame = std::move(frame);
+        self->copy();
+    };
+    if (!m_ports.acquire(m_queue.front(), complete))
+        complete(DirectCaptureFrame{{}, {}, {}, 0, queueError()});
+}
+
+void DirectCaptureWorkflow::copy() {
+    m_phase = Phase::Copying;
+    const quint64 generation = m_generation;
+    const QPointer<DirectCaptureWorkflow> self(this);
+    auto complete = [self, generation](bool published, QString error) {
+        if (!self || self->m_generation != generation || self->m_phase != Phase::Copying)
+            return;
+        if (!error.isEmpty()) {
+            self->report(error);
+            if (!self || self->m_generation != generation || self->m_phase != Phase::Copying)
+                return;
+        }
+        if (!published) {
+            self->finish();
+            return;
+        }
+        // Move the callback before invoking user-facing output, which may shut down the host.
+        if (auto tasks = std::move(self->m_queue.front().afterCopy))
+            tasks(self->m_frame);
+        if (self && self->m_generation == generation && self->m_phase == Phase::Copying)
+            self->publishHistory();
+    };
+    if (!m_ports.copy(m_queue.front(), m_frame, complete))
+        complete(false, queueError());
+}
+
+void DirectCaptureWorkflow::publishHistory() {
+    if (!m_queue.front().historyEnabled) {
+        finish();
+        return;
+    }
+    m_phase = Phase::History;
+    const quint64 generation = m_generation;
+    const QPointer<DirectCaptureWorkflow> self(this);
+    auto complete = [self, generation](QString error) {
+        if (!self || self->m_generation != generation || self->m_phase != Phase::History)
+            return;
+        self->report(error, true);
+        if (self)
+            self->finish();
+    };
+    if (!m_ports.history(m_queue.front(), m_frame, complete))
+        complete(queueError());
+}
+
+void DirectCaptureWorkflow::finish() {
+    if (m_phase == Phase::Stopped || m_phase == Phase::Idle)
+        return;
+    m_queue.pop_front();
+    m_frame = {};
+    m_phase = Phase::Idle;
+    const QPointer<DirectCaptureWorkflow> self(this);
+    if (m_ports.finished)
+        m_ports.finished();
+    if (self)
+        QTimer::singleShot(0, this, [this]() { startNext(); });
+}
+} // namespace snow_shot::presentation

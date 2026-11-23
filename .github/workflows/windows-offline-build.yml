@@ -1,0 +1,96 @@
+name: Windows Offline Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: windows-offline-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline:
+    name: Build Snow Shot offline x64
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Report runner resources
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name,
+              @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } },
+              @{ n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } } |
+            Format-Table -AutoSize | Out-String | Write-Host
+          & cmake --version
+          & rustup --version
+          & git submodule status
+
+      - name: Install packaging tools
+        shell: pwsh
+        run: |
+          choco install nsis nasm -y --no-progress
+
+      - name: Restore toolchain cache
+        id: toolchain-cache
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools/vcpkg
+            .tools/qt/6.12.0
+          key: offline-tools-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json', 'vcpkg.json', 'vcpkg-configuration.json') }}-v1
+
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          .\scripts\bootstrap.ps1 -Preset snow-shot-msvc-offline-release -SkipQtValidation
+
+      - name: Build static Qt 6.12.0
+        shell: pwsh
+        run: |
+          .\scripts\build-static-qt.ps1 `
+            -InstallPrefix .tools/qt/6.12.0/msvc2026_64-static-system-codecs `
+            -Parallelism 4
+
+      - name: Build Snow Shot offline release
+        shell: pwsh
+        run: |
+          .\scripts\build.ps1 -Preset snow-shot-msvc-offline-release
+
+      - name: Package offline installer
+        shell: pwsh
+        run: |
+          .\scripts\package-snow-shot.ps1 -Offline -Architecture x64 -SkipBuild -Parallelism 4
+
+      - name: List packages
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path build\snow-shot-msvc-offline-release -Filter 'snow-shot-*' -File |
+            Select-Object Name, Length |
+            Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Upload offline packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-shot-offline-windows-x64
+          if-no-files-found: warn
+          path: |
+            build/snow-shot-msvc-offline-release/*.exe
+            build/snow-shot-msvc-offline-release/*.zip
+            build/snow-shot-msvc-offline-release/*.sha256
+            build/snow-shot-msvc-offline-release/*.manifest.json

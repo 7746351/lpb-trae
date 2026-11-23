@@ -1,0 +1,621 @@
+#ifndef SNOW_SHOT_PRESENTATION_SCREENSHOTRECOGNITIONSESSIONCONTROLLER_H
+#define SNOW_SHOT_PRESENTATION_SCREENSHOTRECOGNITIONSESSIONCONTROLLER_H
+
+#include "snow_shot/network/snowshotapiclient.h"
+#include "snow_shot/app/edition.h"
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+#include "snow_shot/translation/translationservice.h"
+#endif
+#include "snow_shot/presentation/screenshotocrrecognitionservice.h"
+#include "snow_shot/presentation/screenshotqrrecognitionservice.h"
+#include "snow_shot/presentation/screenshotrecognitionresults.h"
+#include "snow_shot/presentation/screenshotrecognitionmodel.h"
+#include "snow_shot/presentation/screenshotrecognitionfileexport.h"
+
+#include <QObject>
+#include <QJsonObject>
+#include <QHash>
+#include <QCache>
+#include <QFont>
+#include <QImage>
+#include <QPointer>
+#include <QRectF>
+#include <QSet>
+#include <QStringList>
+#include <QVector>
+#include "snow_shot/storage/settingsadapters.h"
+
+#include <functional>
+#include <memory>
+#include <atomic>
+#include <tuple>
+#include <utility>
+
+class QUrl;
+class QMimeData;
+class QTextDocument;
+class QTimer;
+class QWidget;
+class ScreenshotOcrPresentation;
+struct ScreenshotOcrTextUpdate;
+class ScreenshotOcrTextEditingSession;
+class ScreenshotRecognitionWindow;
+class ScreenshotImageConversionController;
+class ScreenshotTableEditingSession;
+class ScreenshotTableConversionController;
+class ScreenshotTableDocument;
+struct ScreenshotTableCommandState;
+
+namespace adqt::widgets {
+class AdModal;
+}
+
+struct ScreenshotRecognitionTarget {
+    QString key;
+    QImage image;
+    QRectF canvasRect;
+    std::shared_ptr<QTextDocument> formattedTextDocument{};
+    QString formattedPlainText{};
+
+    [[nodiscard]] bool isValid() const {
+        return !key.isEmpty() && !image.isNull() && canvasRect.isValid() && !canvasRect.isEmpty();
+    }
+
+    [[nodiscard]] bool hasFormattedText() const {
+        return formattedTextDocument != nullptr;
+    }
+};
+
+struct ScreenshotRecognitionSessionActions {
+    std::function<ScreenshotRecognitionWindow*()> ensureContent;
+    std::function<void(std::shared_ptr<ScreenshotOcrPresentation>)> applyOcrPresentation;
+    std::function<void(std::shared_ptr<ScreenshotOcrPresentation>)> applyOcrBackground;
+    std::function<void(std::shared_ptr<QTextDocument>)> applyFormattedText;
+    std::function<void()> clearOcrBackground;
+    std::function<void(bool)> setRecognitionVisualState;
+    std::function<void(int)> setActiveMode;
+    std::function<void(bool, bool, bool, bool)> setTextEditingState;
+    std::function<void(bool, bool, bool, bool, bool, bool, bool)> setTextTranslationState;
+    std::function<void(bool, bool, bool, bool, bool, bool)> setTableEditingState;
+    std::function<void(bool, bool, bool)> setBusyState;
+    std::function<void()> hideLoading;
+    std::function<void(const QString&, bool)> showStatus;
+    std::function<QWidget*()> translationSettingsOwner;
+    std::function<void(const QString&, const QString&)> setTextTransformState;
+    // Split loading callbacks keep the model-download and recognition messages
+    // addressable by separate keys.
+    std::function<void(const QString&)> showModelDownload;
+    std::function<void(const QString&)> showRecognition;
+    std::function<void()> hideModelDownload;
+    std::function<QColor()> ocrBackgroundColor;
+    std::function<void(ScreenshotOcrRequest&)> prepareOcrRenderRequest;
+    std::function<bool()> renderRecognitionInWorker;
+    // The filtered image is a crop; filteredImageCanvasRect is the canvas-space
+    // rect it covers and is invalid when the filtered region is empty.
+    std::function<void(std::shared_ptr<ScreenshotOcrPresentation>, QImage, QRectF)>
+        applyOcrBackgroundImage;
+    std::function<void(const QVector<ScreenshotOcrTextUpdate>&)> updateOcrTexts;
+    // Workflow activity is independent of the host's provider/tool availability.
+    std::function<void(bool active, bool busy, SnowShotImageConversionFormat format)>
+        setConversionState;
+    std::function<void(bool)> setShowOriginalImage;
+    std::function<void(const QString&)> setTextTargetLanguage;
+    std::function<void(bool, bool, bool)> setLatexEditingState;
+    std::function<void(int, const ScreenshotRecognitionModelState&)> setRecognitionModelState;
+    std::function<QImage()> renderTranslationImage;
+    // An empty override opens the workbook with the system's default application.
+    std::function<bool(const QUrl&)> openSpreadsheetUrl{};
+    std::function<void(const QVector<SnowShotChatModel>&, const QString&, bool)>
+        setTextTranslationServices{};
+    // Shared hosts reject UI publication from cached or retired controllers.
+    std::function<bool()> isCurrentSession{};
+    // Empty keeps background preparation and publication enabled.
+    std::function<bool()> shouldRenderTextBackground{};
+    // Hosts with a separate display presentation propagate prepared colors to it.
+    std::function<void(const ScreenshotOcrPresentation&)> applyOcrColors{};
+    Qt::WindowModality translationSettingsModality = Qt::WindowModal;
+};
+
+class ScreenshotRecognitionSessionController final : public QObject {
+    Q_OBJECT
+
+  public:
+    enum class Mode {
+        Text = 0,
+        Table = 1,
+        Qr = 2,
+        Markdown = 3,
+        Html = 4,
+        Latex = 5,
+        Document = 6
+    };
+
+    ScreenshotRecognitionSessionController(ScreenshotOcrRecognitionPort* recognition,
+                                           ScreenshotQrRecognitionPort* qrRecognition,
+                                           SnowShotApiClient* tableRecognition,
+                                           ScreenshotRecognitionSessionActions actions,
+                                           QObject* parent = nullptr);
+    ~ScreenshotRecognitionSessionController() override;
+
+    void setTarget(ScreenshotRecognitionTarget target);
+    // Retain inactive drafts/history without keeping another crop's full-resolution raster.
+    // setTarget with the same identity restores the pixels before the next activation.
+    void releaseTargetImage();
+    // Independent image editors show results directly, without image overlays or companion windows.
+    void setIndependentEditing(bool enabled);
+    [[nodiscard]] QHash<QString, QByteArray> contentCheckpoints() const;
+    [[nodiscard]] QString activeContentKey() const;
+    // Updates an existing formatted target's appearance without resetting session state.
+    void refreshFormattedTarget(QImage image, std::shared_ptr<QTextDocument> document);
+    void setProviders(ScreenshotOcrRecognitionPort* recognition,
+                      ScreenshotQrRecognitionPort* qrRecognition,
+                      SnowShotApiClient* tableRecognition);
+    void seedRecognitionResults(ScreenshotRecognitionResults results);
+    // A lightweight view of the current target's original OCR, without serializing other modes.
+    [[nodiscard]] std::optional<ScreenshotOcrRecognitionResult> cachedTextRecognitionResult() const;
+    [[nodiscard]] QString cachedCompletedTranslationText() const;
+    [[nodiscard]] ScreenshotRecognitionResults cachedRecognitionResults() const;
+    [[nodiscard]] ScreenshotRecognitionResults recognitionResultsSnapshot() const;
+    [[nodiscard]] bool hasTarget() const;
+    void prefetchText();
+    void renderTextBackground();
+    void activate(Mode mode);
+    void setRecognitionModel(const QString& selection);
+    void retryRecognition();
+    [[nodiscard]] QString recognitionModelSelection(Mode mode) const;
+    void deactivate();
+    void retireContentAttachment();
+    [[nodiscard]] bool ownsContentAttachment() const;
+    void invalidate();
+
+    [[nodiscard]] bool active() const;
+    [[nodiscard]] bool busy() const;
+    [[nodiscard]] bool busy(Mode mode) const;
+    [[nodiscard]] Mode mode() const;
+    [[nodiscard]] bool tableModeActive() const;
+    [[nodiscard]] bool qrModeActive() const;
+    [[nodiscard]] bool conversionModeActive() const;
+
+    void mergeTableSelection();
+    void splitTableSelection();
+    void resetTable();
+    [[nodiscard]] bool openSpreadsheetFile();
+    [[nodiscard]] bool openDocumentFile(std::function<void()> opened = {});
+    void undoTableEdit();
+    void redoTableEdit();
+    void undoTextEdit();
+    void redoTextEdit();
+
+    void beginTextEditing();
+    void beginTextTranslation();
+    [[nodiscard]] bool activateCachedTextTranslation();
+    void synchronizeUiState() const;
+    void endTextEditing();
+    void openTranslationSettings();
+    void resetTextEditing();
+    void applyTextFormatting(const QString& value);
+    void applyTextPunctuation(const QString& value);
+    void applyTextTargetLanguage(const QString& language);
+    // Catalog discovery belongs to the selector, independently of translation job readiness.
+    void requestTextTranslationServices();
+    void applyTextTranslationService(const QString& service);
+    [[nodiscard]] bool editing() const;
+    [[nodiscard]] bool translating() const;
+    [[nodiscard]] bool originalImageTranslationActive() const;
+    // Image-based OCR presentation is visible and eligible for recognition-image export.
+    [[nodiscard]] bool originalImageVisible() const;
+    void setShowOriginalImage(bool show);
+    [[nodiscard]] bool showOriginalImage() const {
+        return m_showOriginalImage;
+    }
+    [[nodiscard]] bool hasTextResult() const;
+    [[nodiscard]] QString textDraft() const;
+    [[nodiscard]] QString sourceTextDraft() const;
+    [[nodiscard]] QString originalText() const;
+    [[nodiscard]] QString latexDraft() const;
+    // Publishes received translation text before the host captures the displayed result.
+    bool flushTranslationUpdates();
+    [[nodiscard]] std::unique_ptr<QMimeData>
+    recognitionClipboardMimeData(const ScreenshotOcrPresentation* displayedPresentation = nullptr,
+                                 bool copyFullTextResult = false);
+#if SNOW_SHOT_ENABLE_DOCUMENT_RECOGNITION
+    [[nodiscard]] ScreenshotDocumentCopyRequest documentCopyRequest() const;
+#endif
+    // Commits active table edits before copying the complete document for file saving.
+    // Returns true when a smart full-text copy was accepted (possibly asynchronously).
+    bool prepareSmartClipboard(const ScreenshotOcrPresentation* displayedPresentation,
+                               bool copyFullTextResult,
+                               std::function<void(std::unique_ptr<QMimeData>)> completion);
+    [[nodiscard]] std::optional<ScreenshotRecognitionFileSnapshot> fileExportSnapshot();
+    void setTextDraft(const QString& text);
+    [[nodiscard]] QJsonObject workflowState() const;
+    [[nodiscard]] QJsonObject workflowResult() const;
+    [[nodiscard]] bool editWorkflow(const QJsonObject& params);
+    void cancelWorkflow();
+    void handleTableCommandState(const ScreenshotTableCommandState& state);
+
+  signals:
+    void textEditingChanged(bool editing);
+    void textResultChanged(bool available);
+    void translationCompleted();
+    void textDraftChanged(const QString& text);
+    void recognitionResultsChanged();
+    void workflowStateChanged() const;
+
+  private:
+    struct ParagraphPreparation {
+        std::shared_ptr<ScreenshotOcrPresentation> source;
+        QImage image;
+        QRectF canvasRect;
+        QVector<QPolygonF> quads;
+        std::shared_ptr<ScreenshotOcrPresentation> result;
+        ScreenshotOcrRecognitionPort::RequestToken token = 0;
+        QVector<std::function<void(std::shared_ptr<ScreenshotOcrPresentation>)>> waiting;
+    };
+    QHash<QString, std::shared_ptr<ParagraphPreparation>> m_paragraphPreparations;
+    quint64 m_formattingGeneration = 0;
+    void
+    prepareParagraphs(const QString& key,
+                      std::function<void(std::shared_ptr<ScreenshotOcrPresentation>)> completion);
+    void cancelParagraphPreparations();
+    [[nodiscard]] bool canPublishUi() const;
+    // Asset downloads can surface before recognition acquires a view. Only the current
+    // host may publish those prompts, including their eventual cleanup.
+    template <typename Callback, typename... Arguments>
+    bool notifyCurrentHostCallback(Callback callback, Arguments&&... arguments) const {
+        if (m_destroying)
+            return true;
+        const QPointer<const ScreenshotRecognitionSessionController> lifetime(this);
+        const auto generation = m_transitionGeneration;
+        const auto isCurrent = m_actions.isCurrentSession;
+        const bool current = !isCurrent || isCurrent();
+        if (!lifetime || generation != m_transitionGeneration)
+            return false;
+        if (!current)
+            return true;
+        if (!notifyCallback(std::move(callback), std::forward<Arguments>(arguments)...))
+            return false;
+        if (!lifetime || generation != m_transitionGeneration)
+            return false;
+        const bool stillCurrent = !isCurrent || isCurrent();
+        return lifetime && generation == m_transitionGeneration && stillCurrent;
+    }
+    template <typename Callback, typename... Arguments>
+    bool notifyUiCallback(Callback callback, Arguments&&... arguments) const {
+        if (!canPublishUi())
+            return true;
+        const QPointer<const ScreenshotRecognitionSessionController> lifetime(this);
+        const auto generation = m_transitionGeneration;
+        if (!notifyCallback(std::move(callback), std::forward<Arguments>(arguments)...))
+            return false;
+        return lifetime && generation == m_transitionGeneration && canPublishUi();
+    }
+    template <typename Callback, typename... Arguments>
+    bool notifyCallback(Callback callback, Arguments&&... arguments) const {
+        if (m_destroying)
+            return true;
+        const QPointer<const ScreenshotRecognitionSessionController> lifetime(this);
+        auto values = std::make_tuple(std::forward<Arguments>(arguments)...);
+        std::apply(std::move(callback), values);
+        return !lifetime.isNull();
+    }
+
+    template <typename Signal, typename... Arguments>
+    bool notify(Signal signal, Arguments&&... arguments) const {
+        return notifyCallback(
+            [this, signal](auto&... values) {
+                (const_cast<ScreenshotRecognitionSessionController*>(this)->*signal)(values...);
+            },
+            std::forward<Arguments>(arguments)...);
+    }
+
+    template <typename Owner, typename Method, typename... Arguments>
+    bool invokeOwned(std::shared_ptr<Owner> owner, Method method, Arguments&&... arguments) const {
+        return notifyCallback(
+            [owner = std::move(owner), method](auto&... values) { ((*owner).*method)(values...); },
+            std::forward<Arguments>(arguments)...);
+    }
+    struct TextCacheEntry {
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+        enum class TranslationStatus { Absent, Streaming, Completed, Failed };
+        struct OverlayTranslation {
+            std::shared_ptr<ScreenshotOcrPresentation> presentation;
+            TranslationStatus status = TranslationStatus::Absent;
+            bool failureReported = false;
+            bool captured = false;
+            bool complete = false;
+            QSet<int> streamingLines;
+        };
+#endif
+        ScreenshotOcrRecognitionResult recognitionResult;
+        std::shared_ptr<ScreenshotOcrPresentation> presentation;
+        std::shared_ptr<QTextDocument> formattedDocument;
+        bool formatted = false;
+        std::shared_ptr<ScreenshotOcrTextEditingSession> editingSession;
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+        std::shared_ptr<ScreenshotOcrTextEditingSession> translationSession;
+        QPointer<snow_shot::translation::TranslationJob> translationJob;
+        bool jobInImage = false;
+        QString translationText;
+        QString successfulTranslation;
+        TranslationStatus translationStatus = TranslationStatus::Absent;
+        bool hasSuccessfulTranslation = false;
+#endif
+        bool editing = false;
+        bool defaultTransformsApplied = false;
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+        OverlayTranslation overlayTranslation;
+        QHash<QString, std::shared_ptr<const ScreenshotOcrPresentation>> overlayLayouts;
+        QFont overlayLayoutFont;
+        snow_shot::storage::ScreenshotTranslationConfiguration translationConfiguration;
+        bool hasTranslationConfiguration = false;
+#endif
+    };
+
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    struct TableCacheEntry {
+        std::shared_ptr<ScreenshotTableEditingSession> session;
+        // The parsed source or imported draft, before any editor mutations. Keeping this with
+        // its session lets a lazy parse retain the source checkpoint without parsing at import.
+        QByteArray initialDocumentCheckpoint;
+    };
+#endif
+
+    [[nodiscard]] std::shared_ptr<ScreenshotOcrTextEditingSession>
+    currentEditingSession(const TextCacheEntry& entry) const {
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+        if (m_translating)
+            return entry.translationSession;
+#endif
+        return entry.editingSession;
+    }
+
+    void startTextRecognition(ScreenshotOcrRequestPriority priority);
+    void startTextRender();
+    void startTableRecognition();
+    void startDocumentRecognition();
+    void prepareDocument(quint64 generation, const QString& key,
+                         std::shared_ptr<ScreenshotRecognizedDocument> document,
+                         std::shared_ptr<QTextDocument> preview);
+    void finishDocumentPreparation(quint64 generation, const QString& key,
+                                   std::shared_ptr<ScreenshotRecognizedDocument> document,
+                                   std::shared_ptr<QTextDocument> preview);
+    void cacheDocument(const QString& key, std::shared_ptr<const ScreenshotRecognizedDocument>);
+    [[nodiscard]] std::shared_ptr<const ScreenshotRecognizedDocument>
+    cachedDocument(const QString& key) const;
+    void applyDocument();
+    void showDocumentPreview(std::shared_ptr<const ScreenshotRecognizedDocument> document);
+#if SNOW_SHOT_ENABLE_DOCUMENT_RECOGNITION
+    bool copyDocumentPreview(QString selection);
+#endif
+    void startQrRecognition();
+    void startLatexRecognition();
+#if SNOW_SHOT_ENABLE_LATEX_RECOGNITION
+    void flushLatexStream();
+    void clearLatexStream();
+#endif
+    void loadRecognitionModels(bool refresh = false);
+    bool migrateRecognitionModelPreferences();
+    bool updateRecognitionModels() const;
+    void cancelModelRecognition(Mode mode);
+    void failModelRecognition(const QString& message);
+    [[nodiscard]] QString resolvedRecognitionModel(Mode mode) const;
+    [[nodiscard]] bool hasRecognitionModelResult(Mode mode, const QString& model) const;
+    [[nodiscard]] bool recognitionModelAvailable(const QString& model) const;
+    [[nodiscard]] QString recognitionCacheKey(Mode mode, const QString& model = {}) const;
+    [[nodiscard]] bool recognitionEntryValid(const QString& model,
+                                             const QString& fingerprint) const;
+    void activateModelResult();
+    void applyLatexContents(const QString& source);
+    void handleLatexDocumentChanged(const QString& key);
+    void handleLatexOutput(quint64 generation, const QString& key, SnowShotLatexResult result);
+    void handleTextOutput(quint64 generation, const QString& key,
+                          ScreenshotOcrRecognitionResult output);
+    void handleTableOutput(quint64 generation, const QString& key, SnowShotTableResult result,
+                           std::shared_ptr<ScreenshotTableDocument> prepared = {});
+    void materializeTableEntry(quint64 generation, const QString& key,
+                               ScreenshotTableRecognitionEntry entry, bool allowSynchronous,
+                               std::shared_ptr<ScreenshotTableDocument> prepared = {});
+    void handleQrOutput(quint64 generation, const QString& key,
+                        ScreenshotQrRecognitionResult result);
+    void ensureContent();
+    void attachContent();
+    void clearContent(bool retainTableEditor = false);
+    void applyPresentation(const std::shared_ptr<ScreenshotOcrPresentation>& presentation,
+                           QImage filteredImage = {}, QRectF filteredImageCanvasRect = {});
+    void applyFormattedText(const std::shared_ptr<QTextDocument>& document);
+    void applyTableSession(const std::shared_ptr<ScreenshotTableEditingSession>& session);
+    void applyQrContents(const QStringList& contents);
+    void handleTextDocumentChanged(const QString& key);
+    void handleTranslationDocumentChanged(const QString& key);
+    void prepareIndependentTranslation(TextCacheEntry& entry, const QString& key);
+    void startTranslation();
+    bool showOverlayTranslation();
+    void reportOverlayTranslationFailure();
+    void failTranslationPreparation(const QString& message);
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    bool finishOverlayTranslationLines(snow_shot::translation::TranslationJob* job);
+    bool publishOverlayUpdates(const QString& key, ScreenshotOcrPresentation& presentation,
+                               const QVector<ScreenshotOcrTextUpdate>& updates);
+#endif
+    bool cancelTranslationRequests();
+    void handleTranslationFinished(quint64 generation, const QString& key,
+                                   SnowShotTranslationResult result);
+    void invalidateCurrentTranslation(bool restartIfVisible);
+    bool updateBusyState() const;
+    bool updateConversionState() const;
+    void updateConversionMessage();
+    bool updateTextState() const;
+    void updateOriginalImagePreview() const;
+    void updateTextHighlighting() const;
+    void updateTableState(const ScreenshotTableCommandState& state) const;
+    void clearTextEditingState();
+    [[nodiscard]] bool shouldRenderTextBackground() const;
+    [[nodiscard]] bool shouldRenderRecognitionInWorker() const;
+    void setPendingTextRecognitionRendering(bool enabled);
+    void pollTextModelDownload(quint64 generation);
+    [[nodiscard]] bool textModelDownloading() const;
+    void showModelDownloadMessage();
+    void hideModelDownloadMessage();
+    bool showRecognitionMessage() const;
+    bool hideRecognitionMessage() const;
+    bool showStatus(QString message, bool error) const;
+    void cancelOutstandingRequests();
+    void resetTargetState();
+    void handleRecognitionProviderDestroyed(Mode mode);
+    [[nodiscard]] ScreenshotRecognitionWindow* content() const;
+
+    QPointer<ScreenshotOcrRecognitionPort> m_recognition;
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    QPointer<ScreenshotQrRecognitionPort> m_qrRecognition;
+#endif
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION || SNOW_SHOT_ENABLE_LATEX_RECOGNITION ||                    \
+    SNOW_SHOT_ENABLE_IMAGE_CONVERSION || SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    QPointer<SnowShotApiClient> m_tableRecognition;
+#endif
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    QPointer<snow_shot::translation::TranslationService> m_translationService;
+#endif
+#if SNOW_SHOT_ENABLE_IMAGE_CONVERSION
+    ScreenshotImageConversionController* m_conversion = nullptr;
+    bool m_conversionMessageShown = false;
+#endif
+    ScreenshotRecognitionSessionActions m_actions;
+    bool m_destroying = false;
+    bool m_openingSpreadsheet = false;
+    ScreenshotRecognitionTarget m_target;
+    QPointer<ScreenshotRecognitionWindow> m_content;
+    quint64 m_attachmentToken = 0;
+    quint64 m_transitionGeneration = 0;
+    bool m_uiPublicationEnabled = true;
+    QMetaObject::Connection m_recognitionRetryConnection;
+    QMetaObject::Connection m_conversionRetryConnection;
+    QHash<QString, TextCacheEntry> m_textCache;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    QHash<QString, TableCacheEntry> m_tableCache;
+    QHash<QString, ScreenshotTableRecognitionEntry> m_tableEntries;
+    QHash<QString, QString> m_tableEntryTargets;
+    QString m_tableModelSelection;
+    bool m_tableParsing = false;
+    ScreenshotTableConversionController* m_tableConversion = nullptr;
+    std::shared_ptr<std::atomic_bool> m_tableParsingCancellation;
+#endif
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    QHash<QString, QStringList> m_qrCache;
+#endif
+#if SNOW_SHOT_ENABLE_LATEX_RECOGNITION
+    struct LatexStreamState {
+        QString key;
+        quint64 generation = 0;
+        QString rawSource;
+        QString source;
+        std::shared_ptr<QTextDocument> document;
+        bool reasoningActive = false;
+    };
+    std::shared_ptr<LatexStreamState> m_latexStream;
+    QTimer* m_latexStreamTimer = nullptr;
+    QHash<QString, SnowShotLatexResult> m_latexResults;
+    QHash<QString, std::shared_ptr<ScreenshotOcrTextEditingSession>> m_latexCache;
+    QHash<QString, ScreenshotLatexRecognitionEntry> m_latexEntries;
+    QHash<QString, QString> m_latexEntryTargets;
+    QString m_latexModelSelection;
+    SnowShotApiClient::RequestToken m_latexRequestToken = 0;
+    quint64 m_latexGeneration = 0;
+#endif
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    QHash<QString, SnowShotTableResult> m_tableResults;
+#endif
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    QHash<QString, ScreenshotQrRecognitionResult> m_qrResults;
+#endif
+    std::shared_ptr<ScreenshotOcrPresentation> m_presentation;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    std::shared_ptr<ScreenshotTableEditingSession> m_tableSession;
+#endif
+    QString m_textCacheKey;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    QString m_tableCacheKey;
+#endif
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    QString m_qrCacheKey;
+    QStringList m_qrContents;
+#endif
+    QPointer<QTextDocument> m_textDocument;
+    QString m_editingKey;
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    QString m_translationKey;
+#endif
+    ScreenshotOcrRecognitionPort::RequestToken m_textRequestToken = 0;
+    ScreenshotOcrRecognitionPort::RequestToken m_textRenderRequestToken = 0;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    SnowShotApiClient::RequestToken m_tableRequestToken = 0;
+#endif
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    ScreenshotQrRecognitionPort::RequestToken m_qrRequestToken = 0;
+#endif
+    quint64 m_textGeneration = 0;
+    quint64 m_textRenderGeneration = 0;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION
+    quint64 m_tableGeneration = 0;
+#endif
+#if SNOW_SHOT_ENABLE_QR_RECOGNITION
+    quint64 m_qrGeneration = 0;
+#endif
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    quint64 m_translationGeneration = 0;
+    QTimer* m_translationUpdateTimer = nullptr;
+    QSet<int> m_pendingTranslationUnits;
+    std::shared_ptr<std::atomic_bool> m_overlayPreparation;
+#endif
+    mutable QString m_workflowError;
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION || SNOW_SHOT_ENABLE_LATEX_RECOGNITION ||                    \
+    SNOW_SHOT_ENABLE_IMAGE_CONVERSION
+    SnowShotApiClient::RequestToken m_recognitionModelsToken = 0;
+    quint64 m_recognitionModelsGeneration = 0;
+    QString m_recognitionModelsError;
+    bool m_recognitionModelsLoading = false;
+#endif
+#if SNOW_SHOT_ENABLE_TABLE_RECOGNITION || SNOW_SHOT_ENABLE_LATEX_RECOGNITION
+    // Bound to a usable cached result or request, never to a pending catalog selection.
+    QString m_recognitionEffectiveModel;
+    bool m_recognitionAwaitingModel = false;
+    bool m_savingRecognitionModel = false;
+#endif
+    QCache<QString, std::shared_ptr<const ScreenshotRecognizedDocument>> m_documents{256 * 1024 *
+                                                                                     1024};
+    std::shared_ptr<QTextDocument> m_documentPreview;
+    QString m_documentPreviewKey;
+    std::shared_ptr<std::atomic_bool> m_documentCancellation;
+    quint64 m_documentRequestToken = 0;
+    quint64 m_documentGeneration = 0;
+    bool m_documentParsing = false;
+    bool m_openingDocument = false;
+    QPointer<QObject> m_documentPreparation;
+#if SNOW_SHOT_ENABLE_DOCUMENT_RECOGNITION
+    ScreenshotExportJobHandle m_documentCopyJob;
+    ScreenshotClipboardCommitHandle m_documentClipboardCommit;
+    quint64 m_documentCopyPublication = 0;
+#endif
+    Mode m_mode = Mode::Text;
+    bool m_active = false;
+    bool m_showOriginalImage = false;
+    bool m_independentEditing = false;
+    // "Shown" tracks the visible download prompt; "in progress" tracks that
+    // asset acquisition is still pending for the in-flight text request, even
+    // while only cache verification or helper start-up is running.
+    bool m_textModelDownloadShown = false;
+    bool m_textModelDownloadInProgress = false;
+    bool m_editing = false;
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    bool m_translating = false;
+    bool m_translationInImage = false;
+#else
+    static constexpr bool m_translating = false;
+    static constexpr bool m_translationInImage = false;
+#endif
+#if SNOW_SHOT_ENABLE_TEXT_TRANSLATION
+    QPointer<adqt::widgets::AdModal> m_translationSettingsModal;
+#endif
+};
+
+#endif // SNOW_SHOT_PRESENTATION_SCREENSHOTRECOGNITIONSESSIONCONTROLLER_H

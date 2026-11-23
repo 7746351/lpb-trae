@@ -1,0 +1,71 @@
+#ifndef SNOW_SHOT_PRESENTATION_SCREENRECORDINGCONTROLLER_H
+#define SNOW_SHOT_PRESENTATION_SCREENRECORDINGCONTROLLER_H
+
+#include "snow_shot/presentation/screenshottoolpalette.h"
+
+#include <QObject>
+#include <QRect>
+#include <QJsonObject>
+
+#include <chrono>
+#include <memory>
+#include <functional>
+#include <optional>
+
+class RecordingEffectsSource;
+namespace snow_shot::presentation {
+struct AppPermissionSnapshot;
+}
+
+class ScreenRecordingController final : public QObject {
+    Q_OBJECT
+
+  public:
+    explicit ScreenRecordingController(QObject* parent = nullptr);
+    using EffectsSourceFactory = std::function<std::unique_ptr<RecordingEffectsSource>()>;
+    ScreenRecordingController(EffectsSourceFactory effectsSourceFactory, QObject* parent = nullptr);
+    ~ScreenRecordingController() override;
+
+    // The region is in desktop points on macOS and physical pixels on Windows.
+    void open(const QRect& recordingRegion);
+    using PermissionCheck = std::function<bool(bool microphone, bool input, bool notify)>;
+    void setPermissionCheck(PermissionCheck check);
+#ifdef Q_OS_MACOS
+    void
+    setPreviewPermissionSnapshot(const snow_shot::presentation::AppPermissionSnapshot& snapshot);
+#endif
+    bool isOpen() const;
+    bool isRecording() const;
+    [[nodiscard]] bool blocksMemoryTrimming() const;
+    void startRecording();
+    void stopRecordingAndCopy();
+    void openRecordingFolder();
+    // Terminal session shutdown: preserve media without dialogs or an event loop.
+    void prepareForSessionEnd(int timeoutMs);
+    void offerRecordingRecovery();
+    // The same recording lifecycle as the UI, with per-session options that do not
+    // overwrite user preferences. Errors are reported in state instead of modal dialogs.
+    [[nodiscard]] QJsonObject automationState() const;
+    [[nodiscard]] bool startAutomation(const QRect& region, const QJsonObject& options,
+                                       QString* error);
+    [[nodiscard]] bool controlAutomation(const QString& action, const QJsonObject& payload,
+                                         QString* error);
+    void detachAutomation();
+#ifdef SNOW_SHOT_TEST_HOOKS
+    void setCaptureExclusionSetterForTests(std::function<bool(QWidget*, bool)> setter);
+    void setFollowPointerReaderForTests(std::function<std::optional<QPoint>()> reader);
+    void setFollowClockForTests(std::function<std::chrono::steady_clock::time_point()> clock);
+    void pollCaptureViewportForTests();
+#endif
+
+  signals:
+    void captureActivityChanged(bool active);
+    void finalized();
+    void exportNotificationRequested(const QString& path);
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+#endif // SNOW_SHOT_PRESENTATION_SCREENRECORDINGCONTROLLER_H

@@ -1,0 +1,239 @@
+#ifndef SNOW_SHOT_PRESENTATION_SCREENSHOTOCRRECOGNITIONSERVICE_H
+#define SNOW_SHOT_PRESENTATION_SCREENSHOTOCRRECOGNITIONSERVICE_H
+
+#include <QImage>
+#include <QColor>
+#include <QObject>
+#include <QRectF>
+#include <QPolygonF>
+#include <QSize>
+#include <QString>
+
+#include "snow_shot/presentation/screenshotocrassets.h"
+
+#include <functional>
+#include <memory>
+#include <optional>
+
+inline constexpr qint64 kScreenshotOcrMaximumPixels = 3840LL * 2160LL;
+
+[[nodiscard]] inline bool screenshotOcrImageWithinPixelLimit(const QSize& size) {
+    if (size.width() < 1 || size.height() < 1) {
+        return false;
+    }
+    return static_cast<qint64>(size.width()) * static_cast<qint64>(size.height()) <=
+           kScreenshotOcrMaximumPixels;
+}
+
+class ScreenshotOcrPresentation;
+struct ScreenshotOcrRecognitionResult {
+    std::shared_ptr<ScreenshotOcrPresentation> presentation = {};
+    QString error = {};
+    // Transient worker-produced image. It is never part of the OCR cache.
+    QImage filteredImage = {};
+    // Canvas-space rect covered by filteredImage; the image is a crop of the
+    // request image covering the text regions plus the blur support margin.
+    QRectF filteredImageCanvasRect = {};
+};
+
+enum class ScreenshotOcrRequestPriority { Interactive, Prefetch };
+
+struct ScreenshotOcrParagraphRequest {
+    QImage image;
+    QRectF canvasRect;
+    QVector<QPolygonF> quads;
+};
+struct ScreenshotOcrParagraphResult {
+    QVector<QVector<int>> groups;
+    QString error;
+};
+
+struct ScreenshotOcrColorSource {
+    QImage image;
+    QRectF canvasRect;
+    std::shared_ptr<ScreenshotOcrPresentation> presentation;
+};
+
+enum class ScreenshotOcrDetectorResizePolicy { Max, Min };
+enum class ScreenshotOcrTextDetectionProcessing { AccuracyFirst, SpeedFirst };
+
+[[nodiscard]] inline ScreenshotOcrDetectorResizePolicy
+screenshotOcrDetectorResizePolicyFromValue(const QString& value) {
+    return value == QStringLiteral("min") ? ScreenshotOcrDetectorResizePolicy::Min
+                                          : ScreenshotOcrDetectorResizePolicy::Max;
+}
+
+[[nodiscard]] inline ScreenshotOcrTextDetectionProcessing
+screenshotOcrTextDetectionProcessingFromValue(const QString& value) {
+    return value == QStringLiteral("speed_first")
+               ? ScreenshotOcrTextDetectionProcessing::SpeedFirst
+               : ScreenshotOcrTextDetectionProcessing::AccuracyFirst;
+}
+
+struct ScreenshotOcrRuntimeConfiguration {
+    ScreenshotOcrModelType modelType = ScreenshotOcrModelType::Small;
+    ScreenshotOcrDetectorResizePolicy detectorResizePolicy = ScreenshotOcrDetectorResizePolicy::Max;
+    bool residentProcess = false;
+    bool modelHotStart = false;
+    ScreenshotOcrTextDetectionProcessing textDetectionProcessing =
+        ScreenshotOcrTextDetectionProcessing::AccuracyFirst;
+    bool hardwareAcceleration = false;
+    bool operator==(const ScreenshotOcrRuntimeConfiguration& other) const {
+        return modelType == other.modelType && detectorResizePolicy == other.detectorResizePolicy &&
+               residentProcess == other.residentProcess && modelHotStart == other.modelHotStart &&
+               textDetectionProcessing == other.textDetectionProcessing &&
+               hardwareAcceleration == other.hardwareAcceleration;
+    }
+};
+
+struct ScreenshotOcrRequest {
+    QImage image;
+    QRectF canvasRect;
+    ScreenshotOcrRequestPriority priority = ScreenshotOcrRequestPriority::Interactive;
+    bool renderFilteredImage = false;
+    bool renderOnly = false;
+    std::shared_ptr<ScreenshotOcrPresentation> presentation = {};
+    QColor backgroundColor = {};
+    bool backgroundFill = false;
+    bool prepareVisualColors = false;
+    // Pinned windows rasterize transformed geometry but sample the original pixels.
+    std::optional<ScreenshotOcrColorSource> colorSource = {};
+    // Keep a nonresident worker through callback delivery when the caller may enqueue follow-up
+    // OCR.
+    bool retainProcessThroughCompletion = false;
+};
+
+class ScreenshotOcrRecognitionPort : public QObject {
+  public:
+    explicit ScreenshotOcrRecognitionPort(QObject* parent = nullptr) : QObject(parent) {}
+    using RequestToken = quint64;
+    using Completion = std::function<void(ScreenshotOcrRecognitionResult)>;
+    using ParagraphCompletion = std::function<void(ScreenshotOcrParagraphResult)>;
+
+    virtual ~ScreenshotOcrRecognitionPort() = default;
+    virtual RequestToken groupParagraphs(ScreenshotOcrParagraphRequest request, QObject* receiver,
+                                         ParagraphCompletion completion) {
+        Q_UNUSED(request);
+        Q_UNUSED(receiver);
+        Q_UNUSED(completion);
+        return 0;
+    }
+    virtual RequestToken recognize(ScreenshotOcrRequest request, QObject* receiver,
+                                   Completion completion) = 0;
+    // Optional render-only operation. The default is a no-op so test doubles
+    // only need to implement recognition; the production service performs this
+    // Qt-side image work off the caller thread.
+    virtual RequestToken render(ScreenshotOcrRequest request, QObject* receiver,
+                                Completion completion) {
+        Q_UNUSED(request);
+        Q_UNUSED(receiver);
+        Q_UNUSED(completion);
+        return 0;
+    }
+    // Updates whether an in-flight recognition job should render its transient
+    // filtered image before leaving the worker. This lets a prefetch become
+    // visible, or an abandoned interactive request suppress rendering, without
+    // cancelling recognition and recreating its worker.
+    virtual bool setRenderFilteredImage(RequestToken token, bool enabled,
+                                        const QColor& backgroundColor = {},
+                                        bool backgroundFill = false) {
+        Q_UNUSED(token);
+        Q_UNUSED(enabled);
+        Q_UNUSED(backgroundColor);
+        Q_UNUSED(backgroundFill);
+        return false;
+    }
+    virtual void cancel(RequestToken token) = 0;
+    virtual bool reprioritize(RequestToken token, ScreenshotOcrRequestPriority priority) = 0;
+    // Implementations that manage disk-backed components report whether the
+    // complete runtime and model set is ready before a request is queued.
+    virtual bool modelFilesReady() const {
+        return true;
+    }
+    virtual ScreenshotOcrAssetStatus assetStatus() const {
+        return {ScreenshotOcrAssetPhase::ReadyCached};
+    }
+};
+
+class ScreenshotOcrRecognitionService final : public ScreenshotOcrRecognitionPort {
+    Q_OBJECT
+
+  public:
+    struct Options {
+        // Packaged descriptor/offline payload and writable online component cache.
+        QString offlineRoot;
+        QString cacheRoot;
+        // Resolved proxy URL for component downloads. Empty means direct access.
+        QString proxyUrl;
+        ScreenshotOcrModelType modelType = ScreenshotOcrModelType::Small;
+        ScreenshotOcrDetectorResizePolicy detectorResizePolicy =
+            ScreenshotOcrDetectorResizePolicy::Max;
+        ScreenshotOcrTextDetectionProcessing textDetectionProcessing =
+            ScreenshotOcrTextDetectionProcessing::AccuracyFirst;
+        bool hardwareAcceleration = false;
+        // Explicit local assets, primarily for tests and development builds.
+        QString processPath;
+        QString detectorModelPath;
+        QString recognizerModelPath;
+        QString dictionaryPath;
+        // Bound on waiting for in-flight local rendering at shutdown before
+        // the render pool is abandoned.
+        int shutdownTimeoutMilliseconds = 5000;
+        // Injectable timing scale for deterministic lifecycle tests.
+        int retryTimeUnitMilliseconds = 1000;
+        // Optional worker-side barrier for deterministic rendering/lifecycle tests.
+        std::function<void()> beforeLocalRender;
+        QString paragraphModelPath;
+    };
+
+    explicit ScreenshotOcrRecognitionService(QObject* parent = nullptr);
+    explicit ScreenshotOcrRecognitionService(const Options& options, QObject* parent = nullptr);
+    ~ScreenshotOcrRecognitionService() override;
+
+    RequestToken groupParagraphs(ScreenshotOcrParagraphRequest request, QObject* receiver,
+                                 ParagraphCompletion completion) override;
+
+    RequestToken recognize(ScreenshotOcrRequest request, QObject* receiver,
+                           Completion completion) override;
+    RequestToken render(ScreenshotOcrRequest request, QObject* receiver,
+                        Completion completion) override;
+    bool setRenderFilteredImage(RequestToken token, bool enabled,
+                                const QColor& backgroundColor = {},
+                                bool backgroundFill = false) override;
+    void cancel(RequestToken token) override;
+    bool reprioritize(RequestToken token, ScreenshotOcrRequestPriority priority) override;
+    [[nodiscard]] bool modelFilesReady() const override;
+    [[nodiscard]] ScreenshotOcrAssetStatus assetStatus() const override;
+    [[nodiscard]] QString proxyUrl() const;
+    void setProxyUrl(const QString& proxyUrl);
+    void setModelType(ScreenshotOcrModelType modelType);
+    void setDetectorResizePolicy(ScreenshotOcrDetectorResizePolicy policy);
+    void setTextDetectionProcessing(ScreenshotOcrTextDetectionProcessing processing);
+    void setHardwareAcceleration(bool enabled);
+    // Owner-thread desired configuration. Changes made during storage suspension are retained;
+    // resumed resources use this value while any previous worker remains fully drained.
+    [[nodiscard]] ScreenshotOcrRuntimeConfiguration runtimeConfiguration() const {
+        return m_runtimeConfiguration;
+    }
+    void setRuntimeConfiguration(const ScreenshotOcrRuntimeConfiguration& configuration);
+    [[nodiscard]] int liveWorkerCount() const;
+    [[nodiscard]] bool storageBusy() const;
+    void suspendStorage();
+    void drainStorage();
+    void resumeStorage(const QString& cacheRoot);
+    // Application-thread snapshots; the QProcess itself belongs to the transport thread.
+    [[nodiscard]] qint64 processId() const;
+    [[nodiscard]] QString processPath() const;
+
+  private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+    std::unique_ptr<Impl> m_suspendedImpl;
+    RequestToken m_nextToken = 0;
+    Options m_storageOptions;
+    ScreenshotOcrRuntimeConfiguration m_runtimeConfiguration;
+
+  signals:
+};
+
+#endif // SNOW_SHOT_PRESENTATION_SCREENSHOTOCRRECOGNITIONSERVICE_H

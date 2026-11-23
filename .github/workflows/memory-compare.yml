@@ -1,0 +1,85 @@
+name: memory-compare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  measure:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Download our offline build artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 45161727221 --repo ${{ github.repository }} -n snow-shot-offline-windows-x64 -D ours
+          $zip = Get-ChildItem -Path ours -Recurse -Filter '*portable.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Our portable zip not found in artifact.' }
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath ours\app -Force
+
+      - name: Download official portable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.6.3_snow-shot --repo mg-chao/snow-shot -p '*windows-x64-portable.zip' -D official --clobber
+          $zip = Get-ChildItem -Path official -Filter '*.zip' | Select-Object -First 1
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath official\app -Force
+
+      - name: Measure idle memory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+
+          function Measure-App {
+            param([string]$Label, [string]$Root)
+
+            Get-Process -Name snow_shot, 'snow-shot-mcp', 'snow-ocr-process', crashpad_handler -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+
+            $exe = Get-ChildItem -Path $Root -Recurse -Filter 'snow_shot.exe' | Select-Object -First 1
+            if (-not $exe) { throw "snow_shot.exe not found under $Root" }
+            Write-Host "=== $Label ==="
+            Write-Host "exe: $($exe.FullName)"
+            Write-Host "exe bytes: $((Get-Item $exe.FullName).Length)"
+
+            $proc = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+            foreach ($wait in @(30, 60, 90)) {
+              Start-Sleep -Seconds 30
+              $appDir = (Split-Path -Parent (Split-Path -Parent $exe.FullName))
+              $procs = @(Get-CimInstance Win32_Process | Where-Object {
+                $_.ExecutablePath -and $_.ExecutablePath.StartsWith($appDir, 'OrdinalIgnoreCase')
+              })
+              $rows = foreach ($p in $procs) {
+                $gp = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+                if ($gp) {
+                  [pscustomobject]@{
+                    Name = $gp.ProcessName
+                    Pid = $gp.Id
+                    WorkingSetMB = [math]::Round($gp.WorkingSet64 / 1MB, 1)
+                    PrivateMB = [math]::Round($gp.PrivateMemorySize64 / 1MB, 1)
+                  }
+                }
+              }
+              Write-Host "--- after $wait s ---"
+              $rows | Format-Table -AutoSize | Out-String | Write-Host
+              $ws = ($rows | Measure-Object WorkingSetMB -Sum).Sum
+              $pv = ($rows | Measure-Object PrivateMB -Sum).Sum
+              Write-Host ("TOTAL {0}: processes={1} workingSet={2} MB private={3} MB" -f $Label, @($rows).Count, $ws, $pv)
+              Write-Host ("MAIN {0}: pid={1} exit={2}" -f $Label, $proc.Id, $(if ($proc.HasExited) { $proc.ExitCode } else { 'alive' }))
+            }
+
+            Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and $_.ExecutablePath.StartsWith((Split-Path -Parent (Split-Path -Parent $exe.FullName)), 'OrdinalIgnoreCase')
+            } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Seconds 3
+          }
+
+          Measure-App -Label 'ours-offline' -Root 'ours\app'
+          Measure-App -Label 'official-portable' -Root 'official\app'

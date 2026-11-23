@@ -1,0 +1,83 @@
+name: official-offline-portable
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/official-portable.yml
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Download official offline installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://github.com/mg-chao/snow-shot/releases/download/v1.6.3_snow-shot'
+          Invoke-WebRequest -Uri "$base/snow-shot-1.6.3-windows-x64-offline.exe" -OutFile off.exe
+          Invoke-WebRequest -Uri "$base/snow-shot-1.6.3-windows-x64-offline.exe.sha256" -OutFile off.exe.sha256
+          $expected = (Get-Content off.exe.sha256 -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          $actual = (Get-FileHash off.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "expected $expected"
+          Write-Host "actual   $actual"
+          if ($expected -ne $actual) { throw 'Official installer checksum mismatch.' }
+
+      - name: Silent install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'snow-shot-official'
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          $p = Start-Process -FilePath (Resolve-Path off.exe) -ArgumentList '/S', "/D=$target" -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'Silent install timed out.' }
+          Write-Host "installer exit $($p.ExitCode)"
+          Start-Sleep -Seconds 10
+          Get-ChildItem -Path $target -Recurse -Depth 1 | Select-Object FullName | Out-String | Write-Host
+          if (-not (Test-Path (Join-Path $target 'bin\snow_shot.exe'))) { throw 'Installed tree missing bin\snow_shot.exe' }
+          "installed" | Out-File -FilePath (Join-Path $target 'bin\__data_directory') -Encoding ascii
+          Get-ChildItem $target | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'snow-shot-official'
+          $exe = Join-Path $target 'bin\snow_shot.exe'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $out = Join-Path $env:RUNNER_TEMP 'o-out.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'o-err.txt'
+          $gui = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Start-Sleep -Seconds 25
+          if ($gui.HasExited) {
+            Write-Host '--- stdout ---'; Get-Content $out -ErrorAction SilentlyContinue
+            Write-Host '--- stderr ---'; Get-Content $err -ErrorAction SilentlyContinue
+            throw "GUI smoke test failed with exit code $($gui.ExitCode)."
+          }
+          $proc = Get-Process -Id $gui.Id
+          Write-Host ("GUI alive after 25s, working set {0} MB" -f [math]::Round($proc.WorkingSet64 / 1MB, 1))
+          if (-not $gui.HasExited) { $gui.Kill() }
+          Start-Sleep -Seconds 5
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'snow-shot-official'
+          $zip = 'snow-shot-1.6.3-windows-x64-offline-portable.zip'
+          Compress-Archive -Path (Join-Path $target '*') -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii
+          Write-Host "zip sha256 $hash"
+          Get-Item $zip | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snow-shot-official-offline-portable
+          path: |
+            snow-shot-1.6.3-windows-x64-offline-portable.zip
+            snow-shot-1.6.3-windows-x64-offline-portable.zip.sha256
+          if-no-files-found: error

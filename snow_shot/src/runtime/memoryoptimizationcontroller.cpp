@@ -57,13 +57,13 @@ void MemoryOptimizationController::evaluate() {
         m_activity.markActivity();
     }
     const auto now = m_options.clock();
-    if (now - m_started < 60s || (m_lastAttempt && now - *m_lastAttempt < 5min))
+    if (now - m_started < 20s || (m_lastAttempt && now - *m_lastAttempt < 90s))
         return;
     const auto snapshot = m_activity.snapshot();
     if (snapshot.activeCount != 0 || m_attemptedIdlePeriod == snapshot.idlePeriod)
         return;
     const bool pressure = m_options.lowMemory && m_options.lowMemory().value_or(false);
-    const auto quiet = pressure ? 15s : 60s;
+    const auto quiet = pressure ? 15s : 30s;
     if (now - std::max(snapshot.lastActivity, m_policyChanged) < quiet)
         return;
     const auto before = m_options.sample ? m_options.sample() : std::nullopt;

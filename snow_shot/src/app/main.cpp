@@ -51,6 +51,7 @@
 #include <QRegularExpression>
 #include <QString>
 #include <QDir>
+#include <QPixmapCache>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QSysInfo>
@@ -495,6 +496,9 @@ int main(int argc, char* argv[]) {
     }
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &singleInstance,
                      [&singleInstance] { singleInstance.stopAcceptingLaunchRequests(); });
+    // Floating windows and history thumbnails share the pixmap cache; the Qt
+    // default of 10 MiB is generous for an idle screenshot utility.
+    QPixmapCache::setCacheLimit(4096);
 
 #ifndef Q_OS_MACOS
     // macOS updates use a downloaded DMG, not the standalone transaction helper.

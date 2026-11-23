@@ -2,9 +2,6 @@ name: memory-compare
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/memory-compare.yml
 
 permissions:
   contents: read
@@ -19,7 +16,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 45161727221 --repo ${{ github.repository }} -n snow-shot-offline-windows-x64 -D ours
+          $runId = gh run list --repo ${{ github.repository }} --workflow windows-offline-build.yml --branch main --status success --limit 1 --json databaseId -q '.[0].databaseId'
+          if (-not $runId) { throw 'No successful offline build run found.' }
+          Write-Host "measuring offline build run $runId"
+          gh run download $runId --repo ${{ github.repository }} -n snow-shot-offline-windows-x64 -D ours
           $zip = Get-ChildItem -Path ours -Recurse -Filter '*portable.zip' | Select-Object -First 1
           if (-not $zip) { throw 'Our portable zip not found in artifact.' }
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath ours\app -Force

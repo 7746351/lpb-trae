@@ -40,6 +40,14 @@ jobs:
         run: |
           choco install nsis nasm -y --no-progress
 
+      - name: Pin Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+          rustc --version
+          cargo --version
+
       - name: Restore vcpkg cache
         id: vcpkg-cache
         uses: actions/cache/restore@v4

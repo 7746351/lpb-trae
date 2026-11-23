@@ -566,6 +566,8 @@ $sourceUrls = @(
 ) | Select-Object -Unique
 
 if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+    $sourceParent = Split-Path -Parent $sourceDirectory
+    New-Item -ItemType Directory -Force -Path $sourceParent | Out-Null
     if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
         $downloaded = $false
         foreach ($sourceUrl in $sourceUrls) {

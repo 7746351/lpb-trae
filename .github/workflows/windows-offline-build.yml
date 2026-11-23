@@ -90,6 +90,22 @@ jobs:
           path: .tools/qt/6.12.0
           key: qt-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json') }}-static-v1
 
+      - name: Warm Cargo dependency cache
+        shell: pwsh
+        run: |
+          $pin = Get-Content 'snow-crates/crates/simd-paddle-ocr-rs/rust-toolchain.toml' -Raw
+          if ($pin -notmatch 'channel\s*=\s*"([^"]+)"') { throw 'Invalid OCR toolchain pin.' }
+          $ocr = $Matches[1]
+          cargo "+$ocr" fetch --manifest-path 'snow-crates/crates/snow-ocr-process/Cargo.toml'
+          foreach ($manifest in @(
+            'snow-crates/Cargo.toml',
+            'snow_rust_ffi/Cargo.toml',
+            'snow_shot/rust/snow-shot-mcp/Cargo.toml',
+            'snow_shot/rust/snow-shot-updater/Cargo.toml'
+          )) {
+            cargo fetch --manifest-path $manifest
+          }
+
       - name: Build Snow Shot offline release
         shell: pwsh
         run: |

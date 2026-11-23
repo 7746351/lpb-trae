@@ -2,6 +2,9 @@ name: memory-compare
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/memory-compare.yml
 
 permissions:
   contents: read

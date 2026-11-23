@@ -1606,7 +1606,7 @@ if (-not $Offline) {
 }
 
 # Store staging returns above; it must never invoke this release step recursively.
-if (-not $store -and -not $StageOnly -and $Architecture -eq 'x64') {
+if (-not $store -and -not $StageOnly -and -not $Offline -and $Architecture -eq 'x64') {
     if ($packageVersion -ceq $packageVersionNumeric) {
         & (Join-Path $PSScriptRoot 'package-snow-shot-msix.ps1') -Architecture x64 `
             -OutputDirectory (Join-Path $repoRoot "artifacts/msix/$packageVersion") `

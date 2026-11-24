@@ -1,6 +1,8 @@
 name: Publish Offline Package
 
 on:
+  repository_dispatch:
+    types: [publish-offline]
   workflow_dispatch:
     inputs:
       run_id:
@@ -24,13 +26,17 @@ jobs:
     name: Publish offline package to release
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      BUILD_RUN_ID: ${{ github.event.client_payload.run_id || inputs.run_id }}
+      RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag || 'v1.6.3-offline-ltsc' }}
+      ARTIFACT_NAME: ${{ github.event.client_payload.artifact_name || inputs.artifact_name || 'snow-shot-offline-windows-x64' }}
 
     steps:
       - name: Download artifact from build run
         uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.artifact_name }}
-          run-id: ${{ inputs.run_id }}
+          name: ${{ env.ARTIFACT_NAME }}
+          run-id: ${{ env.BUILD_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: artifacts
 
@@ -41,15 +47,14 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
               --title "Snow Shot 1.6.3 离线便携版 (x64, 无 ICU 依赖)" \
               --notes "静态 Qt 以 -no-icu 构建，兼容 Windows 10 1809 / LTSC 2019。仅离线便携免安装版。"
           fi
           find artifacts -type f \
             \( -name '*.zip' -o -name '*.exe' -o -name '*.sha256' -o -name '*.manifest.json' \) \
-            -print0 | xargs -0 gh release upload "$TAG" --clobber
-          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.url)"'
+            -print0 | xargs -0 gh release upload "$RELEASE_TAG" --clobber
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.url)"'

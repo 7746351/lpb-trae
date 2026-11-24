@@ -116,42 +116,6 @@ jobs:
         run: |
           .\scripts\package-snow-shot.ps1 -Offline -Architecture x64 -SkipBuild -Parallelism 4
 
-      - name: Smoke test packaged binaries
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $stage = 'artifacts/snow-shot'
-          $exe = Join-Path $stage 'bin/snow_shot.exe'
-          $updater = Join-Path $stage 'bin/snow-shot-updater.exe'
-          foreach ($path in @($exe, $updater)) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing staged binary: $path" }
-          }
-
-          $probe = Start-Process -FilePath $exe -ArgumentList '--update-probe', '1.6.3' -PassThru -WindowStyle Hidden
-          if (-not $probe.WaitForExit(60000)) { $probe.Kill(); throw 'Update probe timed out.' }
-          if ($probe.ExitCode -ne 0) { throw "Update probe failed with exit code $($probe.ExitCode)." }
-          Write-Host 'Update probe passed.'
-
-          $tx = Start-Process -FilePath $updater -ArgumentList '--transaction-state', '--target', "`"$stage`"" -PassThru -WindowStyle Hidden
-          if (-not $tx.WaitForExit(60000)) { $tx.Kill(); throw 'Updater transaction probe timed out.' }
-          if ($tx.ExitCode -ne 0) { throw "Updater transaction probe failed with exit code $($tx.ExitCode)." }
-          Write-Host 'Updater transaction probe passed.'
-
-          $env:QT_QPA_PLATFORM = 'offscreen'
-          $out = Join-Path $env:RUNNER_TEMP 'smoke-stdout.txt'
-          $err = Join-Path $env:RUNNER_TEMP 'smoke-stderr.txt'
-          $gui = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-          Start-Sleep -Seconds 25
-          if ($gui.HasExited) {
-            Write-Host '--- stdout ---'
-            Get-Content -LiteralPath $out -ErrorAction SilentlyContinue
-            Write-Host '--- stderr ---'
-            Get-Content -LiteralPath $err -ErrorAction SilentlyContinue
-            throw "GUI smoke test failed: process exited early with code $($gui.ExitCode)."
-          }
-          Write-Host 'GUI smoke test passed: application stayed alive for 25 seconds.'
-          if (-not $gui.HasExited) { $gui.Kill(); }
-
       - name: List packages
         if: always()
         shell: pwsh

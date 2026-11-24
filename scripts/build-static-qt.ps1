@@ -628,6 +628,7 @@ $configureArguments = @(
     $zlibArgument,
     $pngArgument,
     "-no-opengl",
+    "-no-icu",
     "-no-feature-androiddeployqt",
     "-no-feature-wasmdeployqt",
     "-opensource",

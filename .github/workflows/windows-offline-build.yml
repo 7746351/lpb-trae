@@ -9,7 +9,7 @@ on:
       - '.github/workflows/**'
 
 concurrency:
-  group: windows-offline-${{ github.ref }}
+  group: windows-offline-v3-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -75,7 +75,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .tools/qt/6.12.0
-          key: qt-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json') }}-static-v2
+          key: qt-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json') }}-static-v3
 
       - name: Build static Qt 6.12.0
         shell: pwsh
@@ -90,7 +90,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .tools/qt/6.12.0
-          key: qt-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json') }}-static-v2
+          key: qt-${{ runner.os }}-${{ hashFiles('scripts/qt-toolchain.json') }}-static-v3
 
       - name: Warm Cargo dependency cache
         shell: pwsh

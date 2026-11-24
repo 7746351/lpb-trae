@@ -686,7 +686,6 @@ $allowedSystemImports = @(
     "dwmapi.dll",
     "dxgi.dll",
     "gdi32.dll",
-    "icu.dll",
     "imm32.dll",
     "iphlpapi.dll",
     "kernel32.dll",

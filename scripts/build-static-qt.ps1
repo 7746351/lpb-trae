@@ -629,6 +629,7 @@ $configureArguments = @(
     $pngArgument,
     "-no-opengl",
     "-no-icu",
+    "-no-feature-winsdkicu",
     "-no-feature-androiddeployqt",
     "-no-feature-wasmdeployqt",
     "-opensource",
@@ -720,7 +721,8 @@ foreach ($disabledFeature in @(
         "testlib",
         "timezone_locale",
         "wasmdeployqt",
-        "windeployqt")) {
+        "windeployqt",
+        "winsdkicu")) {
     if ($disabledFeature -eq "testlib" -and $enableDevelopmentModules) {
         Assert-CacheEntry -Cache $cache `
             -Pattern "(?m)^QT_FEATURE_${disabledFeature}:(?:INTERNAL|UNINITIALIZED)=ON\r?`$" `

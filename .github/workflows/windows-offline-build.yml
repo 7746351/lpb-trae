@@ -138,7 +138,6 @@ jobs:
           name: snow-shot-offline-windows-x64
           if-no-files-found: warn
           path: |
-            build/snow-shot-msvc-offline-release/*.exe
-            build/snow-shot-msvc-offline-release/*.zip
-            build/snow-shot-msvc-offline-release/*.sha256
-            build/snow-shot-msvc-offline-release/*.manifest.json
+            build/snow-shot-msvc-offline-release/*-portable.zip
+            build/snow-shot-msvc-offline-release/*-portable.zip.sha256
+            build/snow-shot-msvc-offline-release/*-portable.manifest.json

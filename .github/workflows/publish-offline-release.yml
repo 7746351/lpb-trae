@@ -53,9 +53,17 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --title "Snow Shot 1.6.3 离线便携版 (x64, 无 ICU 依赖)" \
-              --notes "静态 Qt 以 -no-icu 构建，兼容 Windows 10 1809 / LTSC 2019。仅离线便携免安装版。"
+              --notes "静态 Qt 以 -no-icu 构建，兼容 Windows 10 1809 / LTSC 2019。仅发布离线便携免安装版，不含安装包。"
           fi
+          # 只保留便携版资产，删除历史安装包等其它文件
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r name; do
+            [ -z "$name" ] && continue
+            case "$name" in
+              *-portable.zip|*-portable.zip.sha256|*-portable.manifest.json) ;;
+              *) gh release delete-asset "$RELEASE_TAG" "$name" --yes || true ;;
+            esac
+          done
           find artifacts -type f \
-            \( -name '*.zip' -o -name '*.exe' -o -name '*.sha256' -o -name '*.manifest.json' \) \
-            ! -name '*symbols*' -print0 | xargs -0 gh release upload "$RELEASE_TAG" --clobber
+            \( -name '*-portable.zip' -o -name '*-portable.zip.sha256' -o -name '*-portable.manifest.json' \) -print0 \
+            | xargs -0 --no-run-if-empty gh release upload "$RELEASE_TAG" --clobber
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.url)"'
